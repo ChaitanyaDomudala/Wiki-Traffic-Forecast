@@ -1,0 +1,439 @@
+---
+title: "project_reg"
+author: "CHAITANYA SHARMA"
+date: "20/11/2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load libraries 
+
+```{r}
+library('readr') # data input
+library('ggplot2') # visualization
+library('ggthemes') # visualization
+library('scales') # visualization
+library('grid') # visualisation
+library('gridExtra') # visualisation
+library('corrplot') # visualisation
+library('ggrepel') # visualisation
+library('RColorBrewer') # visualisation
+library('data.table') # data manipulation
+library('dplyr') # data manipulation
+library('tibble') # data wrangling
+library('tidyr') # data wrangling
+library('parallel')# data wrangling
+library('lazyeval') # data wrangling
+library('broom') # data wrangling
+library('plotly')#visualisation
+library('stringr') # string manipulation
+library('purrr') # string manipulation
+library('forcats') # factor manipulation
+library('lubridate') # date and time
+library('forecast') # time series analysis
+library('tidyverse') # data wrangling
+```
+
+##  Load data:
+
+```{r}
+train=read.csv("/Users/chaitanyasharma/Desktop/Class_596/Project/web-traffic-time-series-forecasting/train_1.csv",header =TRUE,check.names=FALSE)# change the file path 
+#train[,1] = strptime(train[,1], "%Y-%m-%d")
+head(train)
+```
+
+##  File structure and content:
+
+```{r}
+c(ncol(train),nrow(train)) # number of rows & columns in train dataframe
+
+train %>% colnames() %>% head(5) # first 5 column names
+train %>% select(Page) %>% head(5) # First 5 article names under Page column
+```
+145k article names are stored in the additional Page column
+
+## The key data contains a unique alpha-numerical ID for each Page and Date combination, which is the reason for the relatively large file size.
+```{r}
+key = read.csv("/Users/chaitanyasharma/Desktop/Class_596/Project/web-traffic-time-series-forecasting/key_1.csv", header = TRUE)
+glimpse(key)
+```
+### Missing values
+```{r}
+sum(is.na(train))/(ncol(train)*nrow(train))
+```
+
+
+There are about 8% of missing values in train dataset, which is not trivial. we consider them into account for analysis.
+
+##  Data transformations:
+
+### Article names and metadata
+
+To make the train data easier to handle, we split it into two : the article information (from the Page column) and the time series data (dates) from the date columns. We briefly separate the article information into data from wikipedia, wikimedia, and mediawiki due to the different formatting of the Page names. After that, we rejoin all article information into a common data set (pages).
+```{r}
+dates = train %>% select(-Page)
+
+temp = train %>% select(Page) %>% rownames_to_column()
+mediawiki = temp %>% filter(str_detect(Page, "mediawiki"))
+wikimedia = temp %>% filter(str_detect(Page, "wikimedia"))
+wikipedia = temp %>% filter(str_detect(Page, "wikipedia")) %>% 
+  filter(!str_detect(Page, "wikimedia")) %>%
+  filter(!str_detect(Page, "mediawiki"))
+
+wikipedia = wikipedia %>%
+  separate(Page, into = c("temp", "bar"), sep = ".wikipedia.org_") %>%
+  separate(temp, into = c("article", "locale"), sep = -3) %>%
+  separate(bar, into = c("access", "agent"), sep = "_") %>%
+  mutate(locale = str_sub(locale,2,3))
+
+wikimedia = wikimedia %>%
+  separate(Page, into = c("article", "bar"), sep = "_commons.wikimedia.org_") %>%
+  separate(bar, into = c("access", "agent"), sep = "_") %>%
+  add_column(locale = "wikmed")
+
+mediawiki = mediawiki %>%
+  separate(Page, into = c("article", "bar"), sep = "_www.mediawiki.org_") %>%
+  separate(bar, into = c("access", "agent"), sep = "_") %>%
+  add_column(locale = "medwik")
+
+pages = wikipedia %>%
+  full_join(wikimedia, by = c("rowname", "article", "locale", "access", "agent")) %>%
+  full_join(mediawiki, by = c("rowname", "article", "locale", "access", "agent"))
+
+sample_n(pages, size = 5)
+```
+
+
+### Wikipedia Pages
+
+created a separate DF for only wikipedia pages
+
+```{r}
+
+sample_wiki <- train %>% # we use the full sample now
+  filter(!(grepl('www.mediawiki.org',Page))) %>%
+  sample_frac(0.1) %>%
+  gather(Date, Visit, -Page) %>% data.table
+head(sample_wiki)
+```
+
+### Extract name, project, access, agent from WIkIPEDIA pages
+```{r}
+  # extract name, project, access, agent from Page
+    name = mclapply(str_split(sample_wiki$Page,pattern = "_"),
+                  function(x) head(x,length(x)-3))
+    name = mclapply(name, function(x) paste(x,collapse = ' '))
+    
+    page_split <- mclapply(str_split(sample_wiki$Page,pattern = "_"), 
+                         function(x) tail(x,3)) 
+    add <- data.table(Project= unlist(mclapply(page_split, function(x) x[1])),
+                      Access= unlist(mclapply(page_split, function(x) x[2])),
+                      Agent= unlist(mclapply(page_split, function(x) x[3])),
+                      Name = unlist(name))
+    
+    sample_wiki <- cbind(sample_wiki, add)
+    head(sample_wiki)[,-1]
+```
+
+
+
+```{r}
+sample_wiki <- replace_na(sample_wiki,list(Visit = 0))
+```
+
+
+```{r}
+sample_wiki_2 <- sample_wiki %>% 
+  mutate(Date = as.Date(Date,format="%Y-%m-%d"),
+         Year = year(Date),
+         Month = month(Date),
+         Visit_m = Visit/1000000)
+```
+
+```{r}
+head(sample_wiki_2,n=5)
+```
+
+### Data Visualisation
+
+```{r}
+p1 <- pages %>% 
+  ggplot(aes(agent)) + geom_bar(fill = "blue")
+p2 <- pages %>% 
+  ggplot(aes(access)) + geom_bar(fill = "blue")
+p3 <- pages %>% 
+  ggplot(aes(locale, fill = locale)) + geom_bar(color="black") + scale_fill_grey() 
+
+grid.arrange(p1, p2,p3)
+```
+We find that our wikipedia data includes 7 languages: German, English, Spanish, French, Japanese, Russian, and Chinese. All of those are more frequent than the mediawiki and wikimedia pages.
+
+```{r}
+#Visualize the samplewiki data, by Date only
+p_base <- sample_wiki_2 %>%
+  group_by(Date) %>%
+  summarise(Visit_m = sum(Visit_m)) %>%
+  ggplot(aes(Date, Visit_m)) +
+  geom_line() + 
+  theme_classic(base_size = 10,base_family = 'mono') + 
+  ylab('Visit in Millions') + ggtitle('Daily Wikipedia Traffic')
+
+ggplotly(p_base)
+```
+
+```{r}
+# calculate average monthly visits for wiki data
+p_month <- sample_wiki_2 %>%
+  mutate(year_month = format(Date, "%Y-%m")) %>%
+  group_by(year_month, Project) %>%
+  summarise(Visit = mean(Visit)) %>%
+  ggplot(aes(year_month, Visit)) + 
+  geom_bar(stat = 'identity', aes(fill = Project)) + 
+  theme_classic(base_size = 12,base_family = 'mono') + 
+  ylab('Number of Visits') + xlab('Year - Month') + ggtitle('Average Monthly Wikipedia Traffic')
+ggplotly(p_month)
+```
+
+```{r}
+# Visualize by Access
+p_access <- sample_wiki_2 %>%
+  group_by(Date,Access) %>%
+  summarise(Visit_m = sum(Visit_m)) %>%
+  ggplot(aes(Date, Visit_m)) + 
+  geom_line(aes(color = Access)) + 
+  theme_classic(base_size = 12,base_family = 'mono') + ylab('Visit in Millions')
+ggplotly(p_access)
+```
+
+```{r}
+p_agent <- sample_wiki_2 %>%
+  group_by(Date,Agent) %>%
+  summarise(Visit_m = sum(Visit_m)) %>%
+  ggplot(aes(Date, Visit_m)) + 
+  geom_line(aes(color = Agent))+ 
+  # facet_wrap(~Agent, scales = 'free_y') + 
+  theme_classic(base_size = 12,base_family = 'mono') + ylab('Visit in Millions')
+ggplotly(p_agent)
+```
+## Top 10% most frequently visited pages.
+```{r}
+wc <- sample_wiki_2 %>% 
+  group_by(Project, Year, Name) %>%
+  summarise(Visit = sum(Visit)) %>% data.table
+
+wc_en <- wc[grepl('en',Project) & !grepl(Name,pattern = c('Special:'))]
+wc_en_15 <- wc_en[Year == 2015]
+wc_en_16 <- wc_en[Year == 2016]
+```
+## For 2015:
+```{r}
+top_10_en_15 <- top_n(wc_en_15, 10,Visit) %>% select(Name)
+# time trend by the top phrases
+    sample_wiki_2 %>% 
+      filter(Name %in% top_10_en_15$Name,
+             Year == 2015) %>%
+      ggplot() + 
+      geom_bar(aes(x= Date,y = Visit_m), stat = 'identity', fill = 'blue',alpha = 0.7) +
+      facet_wrap(~Name, scales = 'fixed',nrow = 5) +
+      theme_classic(base_size = 12,base_family = 'mono') + ylab('Visit in Millions') +
+      ggtitle('Top 10 Visited Pages in 2015')
+```
+## For 2016:
+```{r}
+top_10_en_16 <- top_n(wc_en_16, 10,Visit) %>% select(Name)
+# time trend by the top phrases
+   sample_wiki_2 %>% 
+      filter(Name %in% top_10_en_16$Name,
+             Year == 2016) %>%
+      ggplot() + 
+      geom_bar(aes(x= Date,y = Visit_m), fill = 'red', alpha = 0.7, stat = 'identity') +
+      facet_wrap(~Name, scales = 'free_y', nrow = 5) +
+      theme_classic(base_size = 12,base_family = 'mono') + ylab('Visit in Millions') +
+      ggtitle('Top 10 Visited Pages in 2016')
+```
+
+
+
+### Time Series Data Extraction
+Custom functions are developed that allows us to extract the time series for a specified row number and also to plot each time series & extract its meta data.
+
+
+```{r}
+time_series <- function(rownr){
+  dates %>%
+    rownames_to_column %>% 
+    filter(rowname == as.character(rownr)) %>% 
+    gather(dates, value, -rowname) %>% 
+    spread(rowname, value) %>%
+    mutate(dates = ymd(dates)) %>% 
+    rename(views = as.character(rownr))
+}
+
+```
+
+```{r}
+plot_timeseries <- function(rownr){
+  art <- pages %>% filter(rowname == rownr) %>% .$article
+  loc <- pages %>% filter(rowname == rownr) %>% .$locale
+  acc <- pages %>% filter(rowname == rownr) %>% .$access
+  time_series(rownr) %>%
+    ggplot(aes(dates, views)) +
+    geom_line() +
+    geom_smooth(method = "loess", color = "blue", span = 1/5) +
+    labs(title = str_c(art, " - ", loc, " - ", acc))
+}
+
+
+plot_timeseries(112)
+```
+
+### Basic time series parameters
+```{r}
+param_timeseries <- function(rownr){
+  temp <- dates %>%
+    filter_((interp(~x == row_number(), .values = list(x = rownr)))) %>%
+    rownames_to_column %>% 
+    gather(dates, value, -rowname) %>% 
+    spread(rowname, value) %>%
+    mutate(dates = ymd(dates),
+          views = as.integer(`1`))
+
+  slope <- ifelse(is.na(mean(temp$views)),0,summary(lm(views ~ dates, data = temp))$coef[2])
+  slope_err <- ifelse(is.na(mean(temp$views)),0,summary(lm(views ~ dates, data = temp))$coef[4])
+
+  bar <- tibble(
+    rowname = rownr,
+    min_view = min(temp$views),
+    max_view = max(temp$views),
+    mean_view = mean(temp$views),
+    med_view = median(temp$views),
+    sd_view = sd(temp$views),
+    slope = slope/slope_err
+  )
+
+  return(bar)
+}
+```
+
+```{r}
+set.seed(4321)
+temp <- sample_n(pages, 5500) #5500
+#foo <- tpages
+rows <- temp$rowname
+pcols <- c("rowname", "min_view", "max_view", "mean_view", "med_view", "sd_view", "slope")
+
+params <- param_timeseries(rows[1])
+for (i in seq(2,nrow(temp))){
+  params <- full_join(params, param_timeseries(rows[i]), by = pcols)
+}
+
+params <- params %>%
+  filter(!is.na(mean_view)) %>%
+  mutate(rowname = as.character(rowname))
+
+```
+
+```{r}
+p1 <- params %>% 
+  ggplot(aes(mean_view)) + geom_histogram(fill = "black", bins = 50) + scale_x_log10()
+p2 <- params %>% 
+  ggplot(aes(max_view)) + geom_histogram(fill = "black", bins = 50) + scale_x_log10()
+p3 <- params %>% 
+  ggplot(aes(sd_view/mean_view)) + geom_histogram(fill = "black", bins = 50) + scale_x_log10()
+p4 <- params %>% 
+  ggplot(aes(slope)) + geom_histogram(fill = "black", bins = 30) + 
+  scale_x_continuous(limits = c(-25,25))
+
+
+plot(p1)
+plot(p2)
+plot(p3)
+plot(p4)
+
+```
+
+```{r}
+time_series_data = data.frame(train[,2:ncol(train)], check.names = FALSE)
+time_series_data[is.na(time_series_data)] <- 0
+time_series_data
+```
+
+### Distribution of Mean PageViews
+```{r}
+#names(time_series_data)
+mean = data.frame(colMeans(time_series_data))
+mean_ts = as.data.frame(t(mean))
+mean_ts
+plot(seq(length(colnames(mean_ts))),mean_ts,type='l',xlab='Days',main='Mean PageView Distribution')
+
+```
+
+### Auto-correlation of Mean PageViews
+```{r}
+days = length(mean_ts)
+acf_mean = acf(mean,lag.max=days,plot = FALSE)
+plot(acf_mean,main='Yearly ACF',xlab='Days',ylab='Correlation')
+
+```
+
+### Partial Auto-correlation of Mean Pageviews
+```{r}
+pacf_mean = pacf(mean,lag.max=days,plot = FALSE)
+plot(pacf_mean,main='Yearly PACF',xlab='Days',ylab='Correlation')
+
+```
+## Forecasting 
+
+```{r}
+plot_auto_arima_rownr <- function(rownr){
+
+  
+
+  pageviews <- time_series(rownr) %>%
+
+    rownames_to_column() %>%
+
+    mutate(rowname = as.integer(rowname))
+
+  len <- 60
+
+  pred_range <- c(nrow(pageviews)-len+1, nrow(pageviews))
+
+  pre_views <- pageviews %>% head(nrow(pageviews)-len)
+
+  post_views <- pageviews %>% tail(len)
+
+
+
+  arima.fit <- auto.arima(tsclean(ts(pre_views$views, frequency = 7)),
+
+                          d = 1, D = 1, stepwise = FALSE, approximation = FALSE)
+  fc_views <- arima.fit %>% forecast(h = len, level = c(50,95))
+
+  autoplot(fc_views) +
+
+    geom_line(aes(rowname/7, views), data = post_views, color = "grey40") +
+
+    labs(x = "Time (weeks)", y = "views vs auto.arima predictions")
+
+}
+```
+
+
+```{r}
+library("gridExtra")
+p1 <- plot_auto_arima_rownr(156)
+
+p2 <- plot_auto_arima_rownr(108765)
+
+p3 <- plot_auto_arima_rownr(35700)
+
+p4 <- plot_auto_arima_rownr(122120)
+
+
+grid.arrange(p1, p2,p3,p4)
+```
+
